@@ -1,4 +1,68 @@
+"""
+RoadPulse - "Google Reviews for Roads"
+A civic platform prototype built with Streamlit + Google Maps + SQLite.
 
+Run with:
+    pip install -r requirements.txt
+    streamlit run roadpulse_app.py
+
+REQUIRED: a Google Maps JavaScript API key (needs a GCP project with
+billing enabled - Google gives a monthly free usage credit, but the API
+itself won't load without billing turned on).
+    1. https://console.cloud.google.com -> create/select a project
+    2. Enable "Maps JavaScript API"
+    3. Create an API key (APIs & Services > Credentials)
+    4. PowerShell: $env:GOOGLE_MAPS_API_KEY = "AIza..."
+    Then run streamlit in the SAME terminal window.
+
+OPTIONAL: "Sign in with Google" (local username/password accounts always
+still work without this - it's an additional option, not a replacement).
+    1. https://console.cloud.google.com -> APIs & Services -> OAuth consent screen
+       (External is fine for a demo; add your own Google account as a test user)
+    2. APIs & Services -> Credentials -> Create Credentials -> OAuth client ID -> Web application
+       Authorized redirect URI: http://localhost:8501  (must match exactly, no trailing slash)
+    3. PowerShell:
+       $env:GOOGLE_OAUTH_CLIENT_ID = "....apps.googleusercontent.com"
+       $env:GOOGLE_OAUTH_CLIENT_SECRET = "..."
+    Then run streamlit in the SAME terminal window.
+
+Architecture note: there is no mature "streamlit-folium"-equivalent for
+Google Maps, so the map is a small HAND-BUILT Streamlit component
+(./gmaps_component/index.html) - plain HTML/JS, no npm/React build.
+It talks to Google Maps directly and reports clicks/drawn lines back to
+Python via Streamlit's component wire protocol.
+
+Features in this version:
+    - Sign up / sign in (hashed passwords, SQLite-backed). Submitting,
+      upvoting, replying, and marking-fixed all require an account.
+    - One-upvote-per-account per review, enforced with a DB unique
+      constraint (not just client-side).
+    - Named replies - every reply shows who posted it.
+    - Point OR drawn-segment reviews, with click-to-select and a draw tool.
+    - "Use my current location" via browser geolocation.
+    - A free location SEARCH box (OpenStreetMap Nominatim, no API key -
+      independent of the Google Maps switch, so no billing needed for this part).
+    - Before/After Fix Proof: mark a road Fixed with a photo, flips its pin green.
+    - Civic Score & badges, tied to your account (persists across sessions).
+    - Municipal Repair Priority Heatmap (Google Maps visualization library).
+    - SLA countdown timer: a public 30-day repair clock on severe, open issues.
+    - Municipal complaint auto-fill: known real portal for Chennai, reverse-
+      geocoded generic fallback everywhere else. Optional AI (Gemini) button
+      to polish the complaint wording - needs GEMINI_API_KEY, degrades gracefully.
+    - Computer Vision damage verification: an uploaded photo is checked by
+      Gemini vision to confirm it's actually road damage (filters out
+      irrelevant/joke images) and classify severity, auto-filling the
+      category/rating. Reuses GEMINI_API_KEY - no separate key needed.
+    - Community News Feed: real Google News RSS headlines about road issues,
+      upvotable by the community (NOT Facebook scraping - see comment on
+      fetch_news_rss for why that's off the table).
+    - Hero-inspired red/blue/web visual theme (original CSS, no copyrighted
+      artwork/logos reproduced).
+
+NOTE on auth: this uses a simple SHA-256 hashed password stored in SQLite -
+good enough for a hackathon demo, but a real deployment would want salted
+hashing (bcrypt/argon2) and proper session/token management.
+"""
 
 import hashlib
 import json
@@ -28,7 +92,12 @@ SLA_DAYS = 30
 # --------------------------------------------------------------------------
 # Municipal complaint routing
 # --------------------------------------------------------------------------
-
+# We only have ONE real, verified portal on file: Greater Chennai
+# Corporation's PGR system. For anywhere else, we reverse-geocode the
+# review's coordinates to find the local district/city name, and if it's
+# not a place we recognize, we hand the citizen a pre-filled generic
+# complaint plus a search link to find their own municipal office's
+# portal - honest about what we do and don't actually know.
 MUNICIPALITY_DIRECTORY = {
     "chennai": {
         "name": "Greater Chennai Corporation (GCC)",
@@ -905,6 +974,21 @@ def safe_str(value, default=""):
     return value if isinstance(value, str) else default
 
 
+def safe_image(path, **kwargs):
+    """
+    Shows a photo if its file still exists on disk, or a friendly message
+    if not - instead of a hard crash. This matters specifically on
+    Streamlit Community Cloud: its local filesystem is EPHEMERAL, wiped
+    on every redeploy/sleep-wake cycle, so a photo_path saved earlier can
+    end up pointing at a file that no longer physically exists even
+    though the database row referencing it still does.
+    """
+    if isinstance(path, str) and os.path.isfile(path):
+        st.image(path, **kwargs)
+    else:
+        st.caption("📷 Photo unavailable (may have been cleared on app restart).")
+
+
 SEVERITY_TO_RATING = {"Mild": 3, "Severe": 2, "Critical": 1}
 
 
@@ -1509,7 +1593,7 @@ with tab_reviews:
 
                         if row["photo_path"] and isinstance(row["photo_path"], str):
                             st.caption("📎 Attach the photo below when you upload it on the portal:")
-                            st.image(row["photo_path"], width=200)
+                            safe_image(row["photo_path"], width=200)
 
                         button_label = "Open Complaint Portal ↗" if is_known_portal else "Search for Local Portal ↗"
                         st.link_button(button_label, municipality_info["url"])
@@ -1530,7 +1614,7 @@ with tab_reviews:
                     st.markdown("---")
                     st.markdown("**🛠️ Mark as Fixed**")
                     if isinstance(row["photo_path"], str):
-                        st.image(row["photo_path"], caption="Reported photo", width=250)
+                        safe_image(row["photo_path"], caption="Reported photo", width=250)
                     if st.session_state.current_user is None:
                         st.caption("Sign in to mark this road as fixed.")
                     else:
@@ -1558,10 +1642,10 @@ with tab_reviews:
                     col_before, col_after = st.columns(2)
                     with col_before:
                         if isinstance(row["photo_path"], str):
-                            st.image(row["photo_path"], caption="Before")
+                            safe_image(row["photo_path"], caption="Before")
                     with col_after:
                         if isinstance(row["fixed_photo_path"], str):
-                            st.image(row["fixed_photo_path"], caption="After")
+                            safe_image(row["fixed_photo_path"], caption="After")
 
                 st.markdown("---")
                 st.markdown("**Replies:**")
